@@ -106,6 +106,19 @@ settings:
 - **WiFi:** configure your network (country code as needed)
 - **Locale:** set timezone as needed
 
+Note that `install.sh` renames the host to `testbench-XXXX`, where `XXXX` is
+the last four hex digits of the wlan0 MAC, so whatever you set here is
+replaced on the first install — and again on every later one, since the rename
+is not a one-time step. To keep a name you chose deliberately:
+
+```bash
+sudo mkdir -p /etc/rfc2217 && sudo touch /etc/rfc2217/keep-hostname
+```
+
+The installer then reports `Keeping host '<name>'` and leaves it alone. If you
+change the hostname by hand, change the `127.0.1.1` line in `/etc/hosts` to
+match in the same breath, or every `sudo` stalls on "unable to resolve host".
+
 ### 2.2 First boot — system hardening
 
 These changes prevent the OOM crash cycle that kills Pi Zero 2 W boards (512 MB).

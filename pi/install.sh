@@ -215,7 +215,18 @@ MAC_IF=wlan0
 MAC_SUFFIX="$(sed 's/://g' "/sys/class/net/$MAC_IF/address" 2>/dev/null | tail -c 5)"
 CURRENT_HOST="$(hostname)"
 
-if [ -n "$MAC_SUFFIX" ]; then
+# A bench can be named on purpose -- for its site, its owner, its rack slot --
+# and the rename above runs on *every* install, not once. Without an opt-out a
+# chosen name silently reverts the next time someone updates, which reads as
+# the machine renaming itself. The manual already says the hostname is for
+# humans and the address is what tools use, so let the human keep theirs.
+#
+# A marker file rather than a config key: this runs before the portal's config
+# is read, and the decision has to be legible from a shell prompt on a bench
+# that may not be answering HTTP yet.
+if [ -f /etc/rfc2217/keep-hostname ]; then
+    echo "Keeping host '$CURRENT_HOST' (/etc/rfc2217/keep-hostname present)"
+elif [ -n "$MAC_SUFFIX" ]; then
     WANT_HOST="testbench-${MAC_SUFFIX}"
     if [ "$CURRENT_HOST" != "$WANT_HOST" ]; then
         echo "Renaming host '$CURRENT_HOST' -> '$WANT_HOST' (from $MAC_IF MAC)"
