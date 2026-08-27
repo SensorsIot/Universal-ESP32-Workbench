@@ -21,6 +21,7 @@ OPENOCD_EXE = os.environ.get(
 OPENOCD_SCRIPTS = os.environ.get(
     "OPENOCD_SCRIPTS", "/usr/local/share/openocd-esp32/scripts")
 OPENOCD_START_TIMEOUT = 5.0
+OPENOCD_LOG = os.environ.get("OPENOCD_LOG", "/tmp/openocd.log")
 
 # Per-chip OpenOCD board configs (USB JTAG built-in)
 BUILTIN_CONFIGS = {
@@ -421,14 +422,21 @@ def start(slot_label: str, slot: dict, gdb_port: int, telnet_port: int,
         cmd += ["-c", f"tcl port {tcl_port_for(gdb_port)}"]
         cmd += ["-c", "bindto 0.0.0.0"]
 
-        # Launch OpenOCD
+        # Launch OpenOCD. stdout goes to a file, never a PIPE: a pipe
+        # nobody drains fills up (~64KB) and then blocks the daemon in
+        # write(), silently wedging it — the failure mode that froze
+        # dnsmasq/hostapd in wifi_controller on a live bench 2026-07-18,
+        # and OpenOCD is just as chatty across long GDB sessions.
         try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
+            logf = open(OPENOCD_LOG, "ab")
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=logf,
+                    stderr=subprocess.STDOUT,
+                )
+            finally:
+                logf.close()  # child keeps its own duplicated fd
         except FileNotFoundError:
             return {"ok": False,
                     "error": f"openocd not found at {OPENOCD_EXE}"}
@@ -437,11 +445,14 @@ def start(slot_label: str, slot: dict, gdb_port: int, telnet_port: int,
 
         # Wait for GDB port to open
         if not _wait_for_port(gdb_port):
-            # Read any output for error diagnosis
+            # Read the log tail for error diagnosis
             output = ""
             try:
                 proc.kill()
-                output = proc.stdout.read()[:500] if proc.stdout else ""
+                with open(OPENOCD_LOG, "rb") as f:
+                    f.seek(0, os.SEEK_END)
+                    f.seek(max(0, f.tell() - 500))
+                    output = f.read().decode(errors="replace")
             except Exception:
                 pass
             if probe:
