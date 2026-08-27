@@ -262,6 +262,16 @@ def _flush_addr(iface: str = None):
         pass
 
 
+# (table, chain, rule-args) for the wlan0→eth0 NAT bridge — shared by
+# _enable_nat/_disable_nat so setup and teardown can't drift apart.
+_NAT_RULES = [
+    ("nat", "POSTROUTING", ["-s", AP_SUBNET, "-o", "eth0", "-j", "MASQUERADE"]),
+    ("filter", "FORWARD", ["-i", WLAN_IF, "-o", "eth0", "-j", "ACCEPT"]),
+    ("filter", "FORWARD", ["-i", "eth0", "-o", WLAN_IF, "-m", "state",
+                           "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"]),
+]
+
+
 def _enable_nat():
     """Bridge the wlan0 AP to the LAN/internet via NAT masquerade on eth0.
 
@@ -270,19 +280,30 @@ def _enable_nat():
     """
     subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=1"],
                    capture_output=True, check=False)
-    # (table, chain, rule-args) — added only if not already present (-C).
-    rules = [
-        ("nat", "POSTROUTING", ["-o", "eth0", "-j", "MASQUERADE"]),
-        ("filter", "FORWARD", ["-i", WLAN_IF, "-o", "eth0", "-j", "ACCEPT"]),
-        ("filter", "FORWARD", ["-i", "eth0", "-o", WLAN_IF, "-m", "state",
-                               "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"]),
-    ]
-    for table, chain, args in rules:
+    for table, chain, args in _NAT_RULES:
         base = ["iptables", "-t", table]
         exists = subprocess.run(base + ["-C", chain] + args,
                                 capture_output=True, check=False).returncode == 0
         if not exists:
             subprocess.run(base + ["-A", chain] + args,
+                           capture_output=True, check=False)
+
+
+def _disable_nat():
+    """Remove the NAT bridge rules (best effort, idempotent).
+
+    Without this, one ap_start(internet=True) leaves the bridge in place
+    forever — every later plain ap_start would still give the DUT a path to
+    the LAN/internet, silently breaking the isolation an air-gapped test
+    assumes it has.
+    """
+    for table, chain, args in _NAT_RULES:
+        base = ["iptables", "-t", table]
+        for _ in range(10):  # bounded: -D can fail while -C still matches
+            if subprocess.run(base + ["-C", chain] + args,
+                              capture_output=True, check=False).returncode != 0:
+                break
+            subprocess.run(base + ["-D", chain] + args,
                            capture_output=True, check=False)
 
 
@@ -439,6 +460,8 @@ def ap_start(ssid, password="", channel=6, dns_logging=False, internet=False):
 
         if internet:
             _enable_nat()
+        else:
+            _disable_nat()  # a previous internet=True AP must not leak isolation
 
         _ap_active = True
         _start_hostapd_watcher()
@@ -466,6 +489,7 @@ def _ap_stop_unlocked():
     _ap_dnsmasq_proc = None
     _kill_proc(_ap_hostapd_proc)
     _ap_hostapd_proc = None
+    _disable_nat()
 
     _ap_active = False
     _ap_ssid = ""

@@ -124,18 +124,32 @@ def start():
         with open(MOSQUITTO_CONF, "w") as f:
             f.write("\n".join(conf_lines) + "\n")
 
-        # Start mosquitto
-        _proc = subprocess.Popen(
-            ["mosquitto", "-c", MOSQUITTO_CONF],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        )
+        # Start mosquitto. stdout goes to a file, never a PIPE: a pipe
+        # nobody drains fills up (~64KB) and then blocks the daemon in
+        # write(), silently wedging it — the failure mode that froze
+        # dnsmasq/hostapd in wifi_controller on a live bench 2026-07-18.
+        stdout_log = os.path.join(WORK_DIR, "mosquitto.stdout.log")
+        logf = open(stdout_log, "ab")
+        try:
+            _proc = subprocess.Popen(
+                ["mosquitto", "-c", MOSQUITTO_CONF],
+                stdout=logf, stderr=subprocess.STDOUT,
+            )
+        finally:
+            logf.close()  # child keeps its own duplicated fd
 
         # Wait for it to initialise
         time.sleep(1.0)
         if _proc.poll() is not None:
-            out = _proc.stdout.read().decode(errors="replace")
             _active = False
-            raise RuntimeError(f"mosquitto failed to start: {out[:500]}")
+            try:
+                with open(stdout_log, "rb") as f:
+                    f.seek(0, os.SEEK_END)
+                    f.seek(max(0, f.tell() - 500))
+                    out = f.read().decode(errors="replace")
+            except OSError:
+                out = ""
+            raise RuntimeError(f"mosquitto failed to start: {out}")
 
         _active = True
         logger.info("MQTT broker started on port %d", MQTT_PORT)
