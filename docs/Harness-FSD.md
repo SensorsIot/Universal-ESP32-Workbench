@@ -176,6 +176,7 @@ its own state machine.  Serial operates per slot; WiFi operates on wlan0.
 | Flashing | `POST /api/flash` in progress — proxy stopped, esptool running locally |
 | Resetting | DTR/RTS reset in progress — proxy stopped, direct serial in use |
 | Monitoring | Reading serial output for pattern matching |
+| Writing | `POST /api/serial/write` in progress — bytes going out through the proxy (FR-030) |
 | Flapping | USB connect/disconnect cycling detected — recovery failed or pending |
 | Recovering | USB unbound, recovery in progress (GPIO or backoff) |
 | Download Mode | GPIO holding BOOT LOW, device stable in bootloader — ready to flash |
@@ -193,6 +194,8 @@ State transitions:
 | Resetting | Idle | Reset complete, proxy restarts via hotplug |
 | Idle | Monitoring | `POST /api/serial/monitor` — reads serial via RFC2217 (non-exclusive) |
 | Monitoring | Idle | Pattern matched or timeout expired |
+| *any mode* | Writing | `POST /api/serial/write` — brief, through the proxy; the slot keeps its lease |
+| Writing | *the prior mode* | Write finished, or the proxy could not be reached |
 | Idle | Flapping | 6+ hotplug events in 30s |
 | Flapping | Recovering | Active recovery started (USB unbind) |
 | Recovering | Download Mode | GPIO recovery succeeds (BOOT held LOW) |
@@ -1257,11 +1260,20 @@ endpoint made careless device-halting the default path.**
 Writes through the proxy, which owns the device. Control lines are driven low
 **before** the port opens — `serial_for_url()` asserts them on construction.
 
+For as long as the write lasts the slot reports state `writing`, so the panel
+shows which slot is being talked to. With the retry above that can be several
+seconds, which is exactly the case where the operator wants to see it. The
+prior state is restored afterwards rather than forced to idle — a write during
+a debug session must not end with the slot claiming nothing is attached — and
+only if the state is still `writing`: a reset or a flap that took the slot
+meanwhile owns it.
+
 **Verification contract**
 
 | ID | Precondition · stimulus | Expected observation | Must NOT happen | Tier |
 |---|---|---|---|---|
 | FR-030 | Write a console command to a peer that answers | `{"ok": true, "written": n}`, and the reply appears in the slot's buffer | The device resetting or entering download mode as a side effect of the write |
+| FR-030 | Write to a slot that is in a debug session | The slot reports `debugging` again once the write returns | The slot left reporting `idle`, so the panel shows no live GDB session where one is running |
 
 **Open gap — the bench owns no responder.** The first row is the only one
 that proves a byte left the bench, and it needs something on the far end that

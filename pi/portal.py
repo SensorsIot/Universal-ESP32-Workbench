@@ -86,6 +86,7 @@ STATE_RECOVERING    = "recovering"
 STATE_DOWNLOAD_MODE = "download_mode"
 STATE_DEBUGGING     = "debugging"
 STATE_FLASHING      = "flashing"
+STATE_WRITING       = "writing"
 
 # Module-level state
 slots: dict[str, dict] = {}
@@ -1604,55 +1605,66 @@ def serial_write(slot: dict, data: bytes, timeout: float = 5.0) -> dict:
     if not data:
         return {"ok": False, "error": "nothing to write"}
 
-    # RFC2217 is single-client, and the holder is often transient: a flash
-    # that has just finished, a proxy restarted moments ago by a bench reset.
-    # Failing the write outright makes every caller implement this wait, and
-    # the error it would report — "Remote does not seem to support RFC2217"
-    # — describes a protocol mismatch rather than a slot that is busy for
-    # another second.
-    ser = None
-    last_err = None
-    for attempt in range(4):
-        try:
-            ser = pyserial.serial_for_url(f"rfc2217://127.0.0.1:{tcp_port}",
-                                          do_not_open=True)
-            ser.baudrate = 115200
-            ser.timeout = timeout
-            ser.dtr = False
-            ser.rts = False
-            ser.open()
-            break
-        except Exception as e:
-            last_err = e
-            ser = None
-            if attempt < 3:
-                time.sleep(1.0)
-    if ser is None:
-        return {"ok": False,
-                "error": f"cannot reach the proxy on {tcp_port}: {last_err}"}
+    # Show the write on the panel for as long as it lasts, which with the
+    # retry below can be several seconds. The prior state is restored rather
+    # than forced to idle — a write during a debug session must not end with
+    # the slot claiming nothing is attached to it — and only if the state is
+    # still ours: a reset or a flap that took the slot meanwhile owns it now.
+    prior_state = slot.get("state") or STATE_IDLE
+    slot["state"] = STATE_WRITING
     try:
-        written = ser.write(data)
-        ser.flush()
-        # RFC2217 write() is a socket send: flush() does not guarantee the
-        # bytes have crossed the network, reached the proxy and been put on
-        # the wire. Closing straight away discards them, and the call still
-        # reports success because the local write did succeed. Hold the
-        # connection while the device is given a chance to answer, which both
-        # drains the write and proves it went out.
-        deadline = time.monotonic() + 0.6
-        while time.monotonic() < deadline:
+        # RFC2217 is single-client, and the holder is often transient: a flash
+        # that has just finished, a proxy restarted moments ago by a bench reset.
+        # Failing the write outright makes every caller implement this wait, and
+        # the error it would report — "Remote does not seem to support RFC2217"
+        # — describes a protocol mismatch rather than a slot that is busy for
+        # another second.
+        ser = None
+        last_err = None
+        for attempt in range(4):
             try:
-                if not ser.read(256):
-                    continue
-            except Exception:
+                ser = pyserial.serial_for_url(f"rfc2217://127.0.0.1:{tcp_port}",
+                                              do_not_open=True)
+                ser.baudrate = 115200
+                ser.timeout = timeout
+                ser.dtr = False
+                ser.rts = False
+                ser.open()
                 break
-    except Exception as e:
-        return {"ok": False, "error": f"write failed: {e}"}
-    finally:
+            except Exception as e:
+                last_err = e
+                ser = None
+                if attempt < 3:
+                    time.sleep(1.0)
+        if ser is None:
+            return {"ok": False,
+                    "error": f"cannot reach the proxy on {tcp_port}: {last_err}"}
         try:
-            ser.close()
-        except Exception:
-            pass
+            written = ser.write(data)
+            ser.flush()
+            # RFC2217 write() is a socket send: flush() does not guarantee the
+            # bytes have crossed the network, reached the proxy and been put on
+            # the wire. Closing straight away discards them, and the call still
+            # reports success because the local write did succeed. Hold the
+            # connection while the device is given a chance to answer, which both
+            # drains the write and proves it went out.
+            deadline = time.monotonic() + 0.6
+            while time.monotonic() < deadline:
+                try:
+                    if not ser.read(256):
+                        continue
+                except Exception:
+                    break
+        except Exception as e:
+            return {"ok": False, "error": f"write failed: {e}"}
+        finally:
+            try:
+                ser.close()
+            except Exception:
+                pass
+    finally:
+        if slot["state"] == STATE_WRITING:
+            slot["state"] = prior_state if slot.get("present") else STATE_ABSENT
 
     log_activity(f"serial.write({label}, {len(data)} bytes)", "step")
     return {"ok": True, "written": written or len(data)}
@@ -4962,6 +4974,7 @@ _UI_HTML = """\
         .slot.running { border-color: #00d4ff; box-shadow: 0 0 20px rgba(0,212,255,0.2); }
         .slot.resetting { border-color: #e67e22; box-shadow: 0 0 20px rgba(230,126,34,0.2); }
         .slot.monitoring { border-color: #9b59b6; box-shadow: 0 0 20px rgba(155,89,182,0.2); }
+        .slot.writing { border-color: #f1c40f; box-shadow: 0 0 20px rgba(241,196,15,0.25); }
         .slot.flapping { border-color: #e74c3c; background: #1a0000; }
         .slot.recovering {
             border-color: #e67e22; background: #1a1000;
@@ -4987,6 +5000,7 @@ _UI_HTML = """\
         .status.running { background: #00d4ff; color: #1a1a2e; }
         .status.resetting { background: #e67e22; color: #fff; }
         .status.monitoring { background: #9b59b6; color: #fff; }
+        .status.writing { background: #f1c40f; color: #1a1a2e; }
         .status.flapping { background: #e74c3c; color: #fff; }
         .status.recovering { background: #e67e22; color: #fff; }
         .status.download_mode { background: #2ecc71; color: #1a1a2e; }
@@ -5633,6 +5647,9 @@ async function fetchTestProgress() {
     try {
         const resp = await fetch('/api/test/progress');
         const data = await resp.json();
+        // `ended` only exists once the report-persistence change lands; until
+        // then it is undefined and this reads as "a live session".
+        testPollApply(!!data.active && !data.ended);
 
         if (!data.active) {
             document.getElementById('test-header').textContent = 'No test session active';
@@ -5741,6 +5758,25 @@ async function siggenAtten(val) {
             body: JSON.stringify({db: parseFloat(val)})});
         fetchSiggen();
     } catch (e) { /* ignore */ }
+}
+
+// The 5 s cadence is right for an idle bench. During a run it means a step
+// that has finished sits on the panel for another five seconds, and a slot's
+// WRITING — which lasts under a second on a healthy proxy — is usually gone
+// before anything polls. fetchTestProgress already knows whether a session is
+// live, so it opens and closes a faster timer itself, the same shape as the
+// SDR console's poll. Nothing extra runs on an idle bench.
+let testTimer = null;
+function testPollApply(active) {
+    if (active && !testTimer) {
+        testTimer = setInterval(function () {
+            fetchTestProgress();
+            fetchDevices();
+        }, 1000);
+    } else if (!active && testTimer) {
+        clearInterval(testTimer);
+        testTimer = null;
+    }
 }
 
 async function refresh() {
