@@ -859,6 +859,12 @@ class TestbenchDriver:
             "response": response,
         })
 
+    def ble_read(self, characteristic: str) -> dict:
+        """Read hex bytes from a GATT characteristic."""
+        return self._api_post("/api/ble/read", {
+            "characteristic": characteristic,
+        })
+
     def ble_status(self) -> dict:
         """Get BLE connection state."""
         return self._api_get("/api/ble/status")
