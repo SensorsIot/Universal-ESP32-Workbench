@@ -1985,6 +1985,7 @@ State transitions:
 | POST | /api/ble/disconnect | Disconnect from current peripheral |
 | GET | /api/ble/status | Connection state and device info |
 | POST | /api/ble/write | Write raw bytes to a GATT characteristic |
+| POST | /api/ble/read | Read raw bytes from a GATT characteristic |
 
 **POST /api/ble/scan** body (optional):
 ```json
@@ -2064,6 +2065,20 @@ States: `"idle"`, `"scanning"`, `"connected"`.
 {"ok": true, "bytes_written": 6}
 ```
 
+**POST /api/ble/read** body:
+```json
+{"characteristic": "6e400003-b5a3-f393-e0a9-e50e24dcca9e"}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| characteristic | string | Yes | Source GATT characteristic UUID |
+
+**Response:**
+```json
+{"ok": true, "characteristic": "6e400003-b5a3-f393-e0a9-e50e24dcca9e", "data": "48656c6c6f", "size": 5}
+```
+
 **Error responses:**
 
 | Condition | HTTP | Response |
@@ -2073,6 +2088,7 @@ States: `"idle"`, `"scanning"`, `"connected"`.
 | Device not found | 404 | `{"ok": false, "error": "device not found"}` |
 | Write failed | 500 | `{"ok": false, "error": "write failed: ..."}` |
 | Invalid hex data | 400 | `{"ok": false, "error": "invalid hex data"}` |
+| Read failed | 500 | `{"ok": false, "error": "read failed: ..."}` |
 
 **Driver methods:**
 ```python
@@ -2080,6 +2096,7 @@ devices = wt.ble_scan(timeout=5.0, name_filter="iOS-Keyboard")
 info = wt.ble_connect("1C:DB:D4:84:58:CC")
 status = wt.ble_status()
 wt.ble_write("6e400002-b5a3-f393-e0a9-e50e24dcca9e", bytes([0x02]) + b"Hello")
+data = wt.ble_read("6e400003-b5a3-f393-e0a9-e50e24dcca9e")
 wt.ble_disconnect()
 ```
 

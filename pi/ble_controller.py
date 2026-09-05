@@ -203,6 +203,31 @@ def write(characteristic: str, data: bytes, response: bool = True) -> dict:
         return {"ok": False, "error": f"write failed: {e}"}
 
 
+def read(characteristic: str) -> dict:
+    """Read raw bytes from a GATT characteristic."""
+    if not available():
+        return {"ok": False, "error": "bleak not installed — run: pip3 install bleak"}
+
+    with _lock:
+        client = _client
+        if client is None or _state != "connected":
+            return {"ok": False, "error": "not connected"}
+
+    try:
+        async def _read():
+            return await client.read_gatt_char(characteristic)
+
+        data = _run_async(_read())
+        return {
+            "ok": True,
+            "characteristic": characteristic,
+            "data": data.hex(),
+            "size": len(data)
+        }
+    except Exception as e:
+        return {"ok": False, "error": f"read failed: {e}"}
+
+
 def shutdown():
     """Stop the event loop and clean up."""
     global _loop
